@@ -20,7 +20,7 @@ def configure_save_path(dataset):
     if not os.path.exists(save_dir_date): os.mkdir(save_dir_date)
     if not os.path.exists(save_dir_time): os.mkdir(save_dir_time)
 
-    return save_dir_time
+    return save_dir_time, date_str+time_str
 
 def plot_losses(path, coord_losses, type_losses, L_losses, kld_losses, num_atom_losses):
     np.savez_compressed(path+".npz", coord_losses=coord_losses, type_losses=type_losses,

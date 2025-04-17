@@ -9,6 +9,7 @@ from model.diffusion import TGDiffusion
 from torch_geometric.data import DataLoader
 from model.dataset import MaterialDataset
 from utils import configure_save_path, plot_losses, save_model, load_model, delete_model
+import wandb
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -25,13 +26,13 @@ def get_model_size(model):
 
     return model_size_in_MB, num_params
 
-def train_epoch(dataloader, model):
+def train_epoch(dataloader, model, additional_train_args):
     iters = len(dataloader)
     diff_losses, coord_losses, lattice_losses = np.empty(iters), np.empty(iters), np.empty(iters)
 
     for i, batch in enumerate(dataloader):
         batch=batch.to(device)
-        loss, loss_lattice, loss_coord  = model(batch)
+        loss, loss_lattice, loss_coord  = model(batch, **additional_train_args)
         model.optim.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_value_(model.parameters(), 1.)
@@ -58,8 +59,20 @@ def validate(dataloader, model):
 
 
 
-def train(train_dataloader, val_dataloader, test_dataloader, model, epochs, dataset,is_validate):
-    basedir = configure_save_path(dataset)
+def train(train_dataloader, val_dataloader, test_dataloader, model, epochs, dataset,is_validate, additional_train_args, args):
+    basedir, datetime_str = configure_save_path(dataset)
+    
+    if args.is_baseline:
+        exp_name = f"{args.dataset}_{args.prompt_type}_{args.timesteps}_{datetime_str}"
+    else:
+        exp_name = f"{args.dataset}_{args.prompt_type}_{args.timesteps}_{args.n_perm}_{args.num_trans}_{args.z}_{args.weighted_coord_loss}_{datetime_str}"
+
+    wandb.init(
+        project="tgdmat",
+        name=exp_name,
+        config=vars(args)
+    )
+    
     path = os.path.join(basedir, config.file_name_model)
     figpath = os.path.join(basedir, config.file_name_plot)
     min_loss = 1e8
@@ -73,12 +86,22 @@ def train(train_dataloader, val_dataloader, test_dataloader, model, epochs, data
 
     for epoch in tqdm(range(epochs)):
         t0 = time()
-        loss, coord_loss, lattice_loss = train_epoch(train_dataloader, model)
+        loss, coord_loss, lattice_loss = train_epoch(train_dataloader, model, additional_train_args)
         if is_validate:
             val_loss, val_coord_loss, val_lattice_loss = validate(val_dataloader, model)
+        else:
+            val_loss = loss
         model.scheduler.step(loss)
-
-        if loss < min_loss:
+        wandb.log({
+            "epoch": epoch,
+            "train/diff_loss": loss,
+            "train/coord_loss": coord_loss,
+            "train/lattice_loss": lattice_loss,
+            "val/coord_loss": val_coord_loss if is_validate else None,
+            "val/lattice_loss": val_lattice_loss if is_validate else None,
+            "time_per_epoch": time() - t0
+        })
+        if val_loss < min_loss:
             save_model(model, f"{path}_{epoch:03d}.pt")
             if best_epoch is not None: delete_model(f"{path}_{best_epoch:03d}.pt")
             min_loss = loss
@@ -119,6 +142,10 @@ def train(train_dataloader, val_dataloader, test_dataloader, model, epochs, data
             out.writelines("\n")
 
     _, test_coord_loss, test_lattice_loss = validate(test_dataloader, model)
+    wandb.log({
+        "test/coord_loss": test_coord_loss,
+        "test/lattice_loss": test_lattice_loss
+    })
     print(f"Test Coord Loss: {test_coord_loss:.4f}, "
           f"Lattice Loss: {test_lattice_loss:.4f}, [{time() - t0:.2f}s]")
 
@@ -145,15 +172,20 @@ def main(args):
     print("Model Size (in MB): ",round(model_size_in_MB,2) )
     print("Prompt Type ",args.prompt_type)
     root_path = "../data_text/"
-    train_dataset = MaterialDataset(root_path, args.dataset, args.prompt_type, config.train_data)
+    train_dataset = MaterialDataset(root_path, args.dataset, args.prompt_type, config.train_data, n_perm=args.n_perm)
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=True)
     val_dataset = MaterialDataset(root_path, args.dataset, args.prompt_type, config.eval_data)
     val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=True)
     test_dataset = MaterialDataset(root_path, args.dataset, args.prompt_type, config.test_data)
     test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=True)
+    additional_train_args = {
+        'is_baseline': args.is_baseline,
+        'num_trans': args.num_trans,
+        'weighted_coord_loss': args.weighted_coord_loss,
+        'z': args.z,
+    }
 
-
-    train(train_dataloader, val_dataloader, test_dataloader, model, args.epochs,args.dataset,args.is_validate)
+    train(train_dataloader, val_dataloader, test_dataloader, model, args.epochs,args.dataset,args.is_validate, additional_train_args, args)
 
 
 if __name__ == "__main__":
@@ -167,5 +199,10 @@ if __name__ == "__main__":
     parser.add_argument('--prompt_type', type=str, default='long')  # long or short
     parser.add_argument('--timesteps', type=int, default=1000)
     parser.add_argument('--is-validate', type=bool, default=True)
+    parser.add_argument('--n_perm', type=int, default=0)
+    parser.add_argument('--num_trans', type=int, default=0)
+    parser.add_argument('--z', type=float, default=None)
+    parser.add_argument('--is_baseline', action='store_true')
+    parser.add_argument('--weighted_coord_loss', action='store_true')
     args = parser.parse_args()
     main(args)

@@ -2,11 +2,13 @@ import math
 import torch
 from torch import nn, optim
 import torch.nn.functional as F
+from torch_scatter import scatter
+
 from tqdm import tqdm
 # from model.decoder import MaTDecoder
 from model.t2mnet import T2MNet
 from model.diff_utils import BetaScheduler,SigmaScheduler
-from model.diff_utils import d_log_p_wrapped_normal
+from model.diff_utils import d_log_p_wrapped_normal, d_log_p_wrapped_normal_stable
 from model.data_utils import lattice_params_to_matrix_torch
 
 MAX_ATOMIC_NUM=100
@@ -60,7 +62,65 @@ class TGDiffusion(nn.Module):
         self.optim = optim.Adam(self.parameters(), lr=0.001)
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optim, mode='min', factor=0.6, patience=30, threshold=0.0001)
 
-    def forward(self, batch):
+    def _compute_log_p_and_d_log_p(self, x, sigmas_per_atom, batch):
+        if len(x.shape) == 2:
+            x = x.unsqueeze(0)
+        k = torch.arange(-10, 11).to(self.device).view(-1,1,1,1)
+        # k = torch.arange(-10, 11).to(sigmas_per_atom.device).view(-1,1,1)
+        log_p_xt_given_xo = torch.logsumexp(( - (x - k)**2 / 2 / sigmas_per_atom**2), 0)
+        log_p_xt_given_xo = scatter(log_p_xt_given_xo, batch, dim=-2, reduce='sum').sum(-1)
+        permuted_tar_x = d_log_p_wrapped_normal_stable(x, sigmas_per_atom) 
+        return log_p_xt_given_xo, permuted_tar_x
+    
+    def _compute_target_score(self, frac_coords_t, sigmas, batch, num_trans, z):
+        self.device = batch.frac_coords.device
+        batch_size = batch.num_graphs
+        if batch.get("permuted_frac_coords", None) is not None:
+            permuted_frac_coords = batch.permuted_frac_coords
+        else:
+            permuted_frac_coords = batch.frac_coords
+            
+        num_permutations = permuted_frac_coords.shape[0] // batch.frac_coords.shape[0]
+        # duplicate batch.batch to match permuted_frac_coords
+        repeated_batch = torch.arange(batch.num_atoms.shape[0] * num_permutations).to(self.device).repeat_interleave(batch.num_atoms.repeat_interleave(num_permutations)) # type: ignore
+        batch_size = batch.num_atoms.shape[0]
+        if num_trans > 0:
+            # sample translation noise
+            random_shifts = torch.rand((num_trans, batch_size * num_permutations, 3), device=self.device) # type: ignore
+            expanded_shifts = random_shifts[:, repeated_batch]
+        
+            # get all permuted version of frac_coords
+            all_permuted_frac_coords = (permuted_frac_coords.unsqueeze(0) + expanded_shifts + 1) % 1.
+        else:
+            all_permuted_frac_coords = permuted_frac_coords.unsqueeze(0)
+                                                                                    
+        # duplicate frac_coords_t to match all_permuted_frac_coords
+        sample_offset = torch.cumsum(batch.num_atoms, dim=0)
+        sample_offset_full = torch.cat((torch.tensor([0]).to(self.device), sample_offset)) # type: ignore
+        repeated_sample_offset_full = torch.cat([torch.tile(torch.arange(sample_offset_full[i], sample_offset_full[i+1]), (num_permutations,)) for i in range(len(sample_offset_full)-1)]) # type: ignore
+        repeated_frac_coords_t = frac_coords_t[repeated_sample_offset_full]
+
+        # duplicate sigmas stuff to match all_permuted_frac_coords
+        if type(sigmas) is torch.Tensor:
+            repeated_sigmas_per_atom = sigmas.repeat_interleave(num_permutations*batch.num_atoms)[:,None]
+        else:
+            repeated_sigmas_per_atom = sigmas
+        # repeated_sigmas_norm_per_atom = sigmas_norm.repeat_interleave(num_permutations*batch.num_atoms)[:,None]
+        repeated_log_p_xt_given_xo, repeated_permuted_tar_x = self._compute_log_p_and_d_log_p(repeated_frac_coords_t - all_permuted_frac_coords, repeated_sigmas_per_atom, repeated_batch) # type: ignore
+
+        flatten_repeated_log_p_xt_given_xo = torch.stack([t.flatten() for t in repeated_log_p_xt_given_xo.chunk(batch_size,-1)])
+        if z is not None and type(z) == float:
+            temperature = torch.clamp(z/sigmas, max=1.0).unsqueeze(-1)
+        else:
+            temperature = 1.0
+        flatten_weights = torch.nn.functional.softmax(flatten_repeated_log_p_xt_given_xo/temperature, dim=-1)
+        weights = torch.cat([w.reshape(-1, num_permutations) for w in flatten_weights],-1)
+        repeated_tar_x = (weights[:,repeated_batch].unsqueeze(-1) * repeated_permuted_tar_x).sum(0)
+        node_batch = sample_offset_full[:-1].repeat_interleave(batch.num_atoms).repeat_interleave(num_permutations) + batch.helper_permuted_indices
+        tar_score_x = scatter(repeated_tar_x, node_batch, dim=0, reduce="sum")
+        return tar_score_x
+            
+    def forward(self, batch, is_baseline=True, num_trans=0, weighted_coord_loss=False,z=None):
         text_emb = self.text_projection(batch.text)
         text_emb = torch.squeeze(text_emb)
 
@@ -90,11 +150,27 @@ class TGDiffusion(nn.Module):
 
         pred_l, pred_x = self.decoder(text_emb, time_emb, batch.atom_types, input_frac_coords, input_lattice, batch.num_atoms, batch.batch)
 
-        tar_x = d_log_p_wrapped_normal(sigmas_per_atom * rand_x, sigmas_per_atom) / torch.sqrt(sigmas_norm_per_atom)
+        tar_x_baseline = d_log_p_wrapped_normal(sigmas_per_atom * rand_x, sigmas_per_atom) / torch.sqrt(sigmas_norm_per_atom)
 
-        loss_lattice = F.mse_loss(pred_l, rand_l)
-        loss_coord = F.mse_loss(pred_x, tar_x)
+        if (batch.get("permuted_frac_coords", None) is not None or num_trans > 0) and not is_baseline:
+            tar_score_x = self._compute_target_score(input_frac_coords, sigmas, batch, num_trans, z) / torch.sqrt(sigmas_norm_per_atom) 
+            
+            ours_weight = torch.sqrt(sigmas_per_atom)
+            if weighted_coord_loss:
+                ours_loss_coord = 2 * F.mse_loss(pred_x * sigmas_per_atom * ours_weight, tar_score_x * sigmas_per_atom * ours_weight)
+            else:
+                ours_loss_coord = 2 * F.mse_loss(pred_x * ours_weight, tar_score_x * ours_weight) # type: ignore   
+            
+            baseline_weight = torch.sqrt(self.sigma_scheduler.sigma_end - sigmas_per_atom)
+            baseline_loss_coord = 2 * F.mse_loss(pred_x * baseline_weight, tar_x_baseline * baseline_weight)
+ 
+            loss_coord = baseline_loss_coord + ours_loss_coord
+        else:
+            ours_loss_coord = 0  
+            baseline_loss_coord = F.mse_loss(pred_x, tar_x_baseline)
+            loss_coord = baseline_loss_coord
 
+        loss_lattice = F.mse_loss(pred_l, rand_l) # latice data prediction loss
         loss = loss_lattice +loss_coord
 
         return loss, loss_lattice, loss_coord

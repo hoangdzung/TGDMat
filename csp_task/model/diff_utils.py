@@ -24,6 +24,18 @@ def sigmoid_beta_schedule(timesteps, beta_start, beta_end):
     betas = torch.linspace(-6, 6, timesteps)
     return torch.sigmoid(betas) * (beta_end - beta_start) + beta_start
 
+def d_log_p_wrapped_normal_stable(x, sigma, N=10, T=1.0):
+    """
+    what should be the shape of sigma?
+    what should be the shape of x?
+    """
+    if len(x.shape) == 2:
+        k = T * torch.arange(-N, N + 1).to(x.device).view(-1,1,1)
+    elif len(x.shape) == 3:
+        k = T * torch.arange(-N, N + 1).to(x.device).view(-1,1,1,1)
+    logits = - 0.5 * (x + k) ** 2 / sigma ** 2
+    weights = torch.nn.functional.softmax(logits, 0)
+    return ((x + k) / sigma ** 2 * weights).sum(0)
 
 def p_wrapped_normal(x, sigma, N=10, T=1.0):
     p_ = 0

@@ -11,11 +11,47 @@ from model.data_utils import (preprocess, add_scaled_lattice_prop)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def generate_permutations(atom_types, length, n_perms):
+    unique_types = np.unique(atom_types)
+    np.random.shuffle(unique_types)
+    indices_by_type = {t: np.where(atom_types == t)[0] for t in unique_types if len(np.where(atom_types == t)[0]) > 1}
+    permuted_indices = []
 
+    for _ in range(n_perms):
+        perm_map = np.arange(length)
 
+        for t in indices_by_type:
+            indices = np.copy(indices_by_type[t])
+            np.random.shuffle(indices)  # Shuffle in-place
+            perm_map[indices_by_type[t]] = indices
+
+        permuted_indices.append(perm_map)
+
+    return np.stack(permuted_indices, 0)
+
+def sample_frac(atom_types, frac_coords, n_perm):
+    """
+    Sample a subset of permuted fractional coordinates.
+
+    Args:
+        group_indices (dict): {group_id -> array of indices}.
+        frac_coords (np.array): Original fractional coordinates of shape (n_atoms, 3).
+        n_perm (int): Number of permutations to sample.
+
+    Returns:
+        np.array: Sampled permuted fractional coordinates of shape (n_perm, n_atoms, 3),
+                  padded with -1 if needed.
+    """
+    # Step 1: Compute the total number of valid permutations
+    
+    permuted_indices = generate_permutations(atom_types, frac_coords.shape[0], n_perm )
+    # Step 2: Apply the sampled permutations to frac_coords
+    sampled_frac_coords = frac_coords[permuted_indices]
+
+    return sampled_frac_coords
 
 class MaterialDataset(Dataset):
-    def __init__(self, data_dir, dataset, prompt_type, file):
+    def __init__(self, data_dir, dataset, prompt_type, file, n_perm=1):
         super().__init__()
         self.dataset = dataset
         self.path = os.path.join(data_dir, dataset, file + ".csv")
@@ -37,7 +73,7 @@ class MaterialDataset(Dataset):
         self.graph_method = 'crystalnn'
         self.lattice_scale_method = 'scale_length'
         self.preprocess_workers = 30
-
+        self.n_perm = n_perm
         # print(self.path)
         # print(dataset)
         # print(file)
@@ -81,7 +117,10 @@ class MaterialDataset(Dataset):
             text = data_dict['text_long']
         else:
             text = data_dict['text_short']
-
+        if self.n_perm > 0:
+            permuted_frac_coords = sample_frac(atom_types, frac_coords, self.n_perm)
+            permuted_frac_coords = permuted_frac_coords.reshape(-1, permuted_frac_coords.shape[-1])
+            
         data = Data(
             frac_coords=torch.Tensor(frac_coords),
             atom_types=torch.LongTensor(atom_types),
@@ -93,7 +132,9 @@ class MaterialDataset(Dataset):
             num_atoms=num_atoms,
             num_bonds=edge_indices.shape[0],
             num_nodes=num_atoms,
-            text=text
+            text=text,
+            permuted_frac_coords=torch.Tensor(permuted_frac_coords) if permuted_frac_coords is not None else None,
+            helper_permuted_indices=torch.arange(len(atom_types)).repeat(self.n_perm) if permuted_frac_coords is not None else torch.arange(len(atom_types)),
         )
         return data
 
