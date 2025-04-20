@@ -252,10 +252,7 @@ class GenEval(object):
 
 
 def get_file_paths(root_path, task, label='', suffix='pt'):
-    if label == '':
-        out_name = f'eval_{task}.{suffix}'
-    else:
-        out_name = f'eval_{task}_{label}.{suffix}'
+    out_name = f'eval_{task}_{label}.{suffix}'
     out_name = os.path.join(root_path, out_name)
     return out_name
 
@@ -333,8 +330,10 @@ def main(args):
             rec_evaluator = RecEval(pred_crys, gt_crys)
         recon_metrics = rec_evaluator.get_metrics()
         all_metrics.update(recon_metrics)
-    for k, v in all_metrics.items():
-        print(k, round(v, 4))
+    with open(recon_file_path.replace('pt','txt'), 'w') as f:
+        for k, v in all_metrics.items():
+            print(k, round(v, 4))
+            f.write(f"{k}: {v}\n")
 
 
 if __name__ == '__main__':

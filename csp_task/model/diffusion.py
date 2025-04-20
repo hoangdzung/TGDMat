@@ -75,7 +75,7 @@ class TGDiffusion(nn.Module):
     def _compute_target_score(self, frac_coords_t, sigmas, batch, num_trans, z):
         self.device = batch.frac_coords.device
         batch_size = batch.num_graphs
-        if batch.get("permuted_frac_coords", None) is not None:
+        if hasattr(batch, "permuted_frac_coords") and batch.permuted_frac_coords is not None:
             permuted_frac_coords = batch.permuted_frac_coords
         else:
             permuted_frac_coords = batch.frac_coords
@@ -152,7 +152,7 @@ class TGDiffusion(nn.Module):
 
         tar_x_baseline = d_log_p_wrapped_normal(sigmas_per_atom * rand_x, sigmas_per_atom) / torch.sqrt(sigmas_norm_per_atom)
 
-        if (batch.get("permuted_frac_coords", None) is not None or num_trans > 0) and not is_baseline:
+        if not is_baseline and ((hasattr(batch, "permuted_frac_coords") and batch.permuted_frac_coords is not None) or num_trans > 0):
             tar_score_x = self._compute_target_score(input_frac_coords, sigmas, batch, num_trans, z) / torch.sqrt(sigmas_norm_per_atom) 
             
             ours_weight = torch.sqrt(sigmas_per_atom)

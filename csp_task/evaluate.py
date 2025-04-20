@@ -140,7 +140,7 @@ def main(args):
         start_time = time.time()
         (frac_coords,  atom_types,_, lengths, angles,num_atoms, input_data_batch) = reconstructon(test_dataloader,model, args.num_evals, step_lr)
         print('Reconstruction Time :', time.time() - start_time)
-        recon_out_name = 'eval_recon.pt'
+        recon_out_name = f'eval_recon_{args.label}.pt'
         path = os.path.join(model_path, args.dataset)
         print(path)
         if not os.path.exists(path):
@@ -171,6 +171,7 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', required=True, type=str, default='perov_5')
     parser.add_argument('--timesteps', type=int, default=1000)
     parser.add_argument('--prompt_type', type=str, default='long')  # long or short
+    parser.add_argument('--label', type=str, default='')  # long or short
     args = parser.parse_args()
     main(args)
     # main('gen/',"30112023","001402",'recon',8,4)

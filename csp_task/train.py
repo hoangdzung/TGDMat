@@ -73,8 +73,8 @@ def train(train_dataloader, val_dataloader, test_dataloader, model, epochs, data
         config=vars(args)
     )
     
-    path = os.path.join(basedir, config.file_name_model)
-    figpath = os.path.join(basedir, config.file_name_plot)
+    path = os.path.join(basedir.rstrip('/') + '_' + exp_name, config.file_name_model)
+    figpath = os.path.join(basedir.rstrip('/') + '_' +  exp_name, config.file_name_plot)
     min_loss = 1e8
     best_epoch = None
 
@@ -184,7 +184,7 @@ def main(args):
         'weighted_coord_loss': args.weighted_coord_loss,
         'z': args.z,
     }
-
+    assert not args.is_baseline
     train(train_dataloader, val_dataloader, test_dataloader, model, args.epochs,args.dataset,args.is_validate, additional_train_args, args)
 
 

@@ -120,6 +120,8 @@ class MaterialDataset(Dataset):
         if self.n_perm > 0:
             permuted_frac_coords = sample_frac(atom_types, frac_coords, self.n_perm)
             permuted_frac_coords = permuted_frac_coords.reshape(-1, permuted_frac_coords.shape[-1])
+        else:
+            permuted_frac_coords = None 
             
         data = Data(
             frac_coords=torch.Tensor(frac_coords),
